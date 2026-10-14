@@ -59,6 +59,23 @@ func TestRatesFromRanges(t *testing.T) {
 	}
 }
 
+func TestAudioQueueReadyStopsOnError(t *testing.T) {
+	q := &audioQueue{ring: &queueRing{}}
+	q.ring.bufs[0], q.ring.bufs[1], q.ring.bufs[2] = 10, 11, 12
+	atomic.StoreUint32(&q.ring.head, 3)
+	var got []uintptr
+	err := q.ready(func(buf uintptr) error {
+		got = append(got, buf)
+		if buf == 11 {
+			return ErrFailedToStartBackendDevice
+		}
+		return nil
+	})
+	if err != ErrFailedToStartBackendDevice || len(got) != 2 || q.tail != 1 {
+		t.Fatalf("err=%v got=%v tail=%d", err, got, q.tail)
+	}
+}
+
 func TestAppendBounded(t *testing.T) {
 	f := appendBounded([]byte{1, 2}, []byte{3, 4, 5}, 4)
 	if string(f) != string([]byte{2, 3, 4, 5}) {
