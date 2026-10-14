@@ -1,0 +1,19 @@
+version: "2"
+run:
+  # Timeout for analysis, e.g. 30s, 5m.
+  timeout: 5m
+linters:
+  settings:
+    errcheck:
+      # Calls to void Win32 functions: the returned GetLastError is meaningless.
+      exclude-functions:
+        - (*syscall.LazyProc).Call
+  exclusions:
+    # Restore the v1 default: unchecked errors from deferred Close/Flush/print are tolerated.
+    presets:
+      - std-error-handling
+    rules:
+      # Calls to void C functions via the //go:linkname'd syscall9: the errno is meaningless.
+      - path: sys_darwin\.go
+        linters: [errcheck]
+        source: '^\s*syscall9\('
