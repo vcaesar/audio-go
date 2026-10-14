@@ -87,6 +87,7 @@ func main() {
 		Data: onSendFrames,
 	}
 
+	deviceConfig.DeviceType = audiogo.Playback
 	device, err = audiogo.InitDevice(ctx.Context, deviceConfig, playbackCallbacks)
 	if err != nil {
 		fmt.Println(err)

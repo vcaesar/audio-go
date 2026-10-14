@@ -346,10 +346,14 @@ type audioQueue struct {
 }
 
 // ready calls fn for every buffer the queue handed back since the last call.
-func (q *audioQueue) ready(fn func(buf uintptr)) {
+// It stops at the first failing fn.
+func (q *audioQueue) ready(fn func(buf uintptr) error) error {
 	for head := atomic.LoadUint32(&q.ring.head); q.tail != head; q.tail++ {
-		fn(q.ring.bufs[q.tail%queueRingSize])
+		if err := fn(q.ring.bufs[q.tail%queueRingSize]); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 func (q *audioQueue) dispose() {
@@ -435,7 +439,7 @@ func (st *caStream) build() error {
 	return nil
 }
 
-func (st *caStream) start(uint64) error {
+func (st *caStream) start(run uint64) error {
 	if st.in == nil && st.out == nil {
 		if err := st.build(); err != nil {
 			return err
@@ -452,7 +456,10 @@ func (st *caStream) start(uint64) error {
 	}
 	if st.out != nil {
 		for _, buf := range st.out.buffers {
-			st.fillPlayback(buf)
+			if err := st.fillPlayback(buf); err != nil {
+				st.teardown()
+				return ErrFailedToStartBackendDevice
+			}
 		}
 	}
 	for _, q := range []*audioQueue{st.in, st.out} {
@@ -463,7 +470,7 @@ func (st *caStream) start(uint64) error {
 		}
 	}
 	st.wg.Add(1)
-	go st.run()
+	go st.run(run)
 	return nil
 }
 
@@ -473,8 +480,13 @@ func (st *caStream) failStart(what string, status int32) error {
 	return ErrFailedToStartBackendDevice
 }
 
-// run handles buffers returned by the queues until stop.
-func (st *caStream) run() {
+// run handles buffers returned by the queues until stop or a queue error.
+func (st *caStream) run(run uint64) {
+	defer func() {
+		if !st.stopping.Load() {
+			go st.sink.fail(run) // queue error: report the stop
+		}
+	}()
 	defer st.wg.Done()
 	for {
 		dispatchSemaphoreWait(st.sem)
@@ -482,15 +494,28 @@ func (st *caStream) run() {
 			return
 		}
 		if st.in != nil {
-			st.in.ready(st.handleCapture)
+			if err := st.in.ready(st.handleCapture); err != nil {
+				return
+			}
 		}
 		if st.out != nil {
-			st.out.ready(st.fillPlayback)
+			if err := st.out.ready(st.fillPlayback); err != nil {
+				return
+			}
 		}
 	}
 }
 
-func (st *caStream) handleCapture(buf uintptr) {
+// enqueue hands buf back to the queue.
+func (st *caStream) enqueue(aq, buf uintptr) error {
+	if status := audioQueueEnqueueBuffer(aq, buf); status != 0 {
+		st.log(fmt.Sprintf("[Core Audio] AudioQueueEnqueueBuffer failed: OSStatus %d", status))
+		return ErrFailedToStartBackendDevice
+	}
+	return nil
+}
+
+func (st *caStream) handleCapture(buf uintptr) error {
 	b := bufferOf(buf)
 	data := unsafe.Slice((*byte)(b.data), b.size)
 	if st.out != nil {
@@ -498,7 +523,7 @@ func (st *caStream) handleCapture(buf uintptr) {
 	} else if n := len(data) / st.in.frameBytes; n > 0 {
 		st.sink.process(nil, data, uint32(n))
 	}
-	audioQueueEnqueueBuffer(st.in.aq, buf)
+	return st.enqueue(st.in.aq, buf)
 }
 
 // appendBounded appends data and drops the oldest bytes beyond limit.
@@ -510,7 +535,7 @@ func appendBounded(fifo, data []byte, limit int) []byte {
 	return fifo
 }
 
-func (st *caStream) fillPlayback(buf uintptr) {
+func (st *caStream) fillPlayback(buf uintptr) error {
 	q := st.out
 	b := bufferOf(buf)
 	n := int(q.frames) * q.frameBytes
@@ -525,7 +550,7 @@ func (st *caStream) fillPlayback(buf uintptr) {
 	}
 	st.sink.process(out, in, q.frames)
 	b.size = uint32(n)
-	audioQueueEnqueueBuffer(q.aq, buf)
+	return st.enqueue(q.aq, buf)
 }
 
 func (st *caStream) stop() error {

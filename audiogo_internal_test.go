@@ -1,6 +1,7 @@
 package audiogo
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -210,6 +211,54 @@ func TestDeviceStopCallbackMayRestart(t *testing.T) {
 		t.Fatal("Start from the Stop callback did not take effect")
 	}
 	dev.Uninit()
+}
+
+func TestDeviceUninitRejectsRestart(t *testing.T) {
+	var dev *Device
+	var f *fakeStream
+	var startErr error
+	dev, f = newFakeDevice(DeviceCallbacks{Stop: func() {
+		startErr = dev.Start()
+	}})
+	if err := dev.Start(); err != nil {
+		t.Fatal(err)
+	}
+	dev.Uninit()
+	if startErr != ErrDeviceNotInitialized {
+		t.Fatalf("Start from the Stop callback during Uninit: %v", startErr)
+	}
+	if f.starts != 1 || f.stops != 1 || !f.closed || dev.IsStarted() {
+		t.Fatalf("starts=%d stops=%d closed=%v started=%v", f.starts, f.stops, f.closed, dev.IsStarted())
+	}
+}
+
+func TestNullCaptureInputIsSilent(t *testing.T) {
+	p := newDeviceParams(&DeviceConfig{DeviceType: Capture, PeriodSizeInFrames: 16})
+	dirty := make(chan bool, 2)
+	s := &sink{data: func(_, in []byte, _ uint32) {
+		select {
+		case dirty <- slices.ContainsFunc(in, func(b byte) bool { return b != 0 }):
+		default:
+		}
+		for i := range in {
+			in[i] = 0xff
+		}
+	}}
+	st, err := nullBackend{}.openDevice(p, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.close()
+	if err := st.start(1); err != nil {
+		t.Fatal(err)
+	}
+	first, second := <-dirty, <-dirty
+	if err := st.stop(); err != nil {
+		t.Fatal(err)
+	}
+	if first || second {
+		t.Fatal("null capture input is not silent")
+	}
 }
 
 func TestDeviceStartError(t *testing.T) {

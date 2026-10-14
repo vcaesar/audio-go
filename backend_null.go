@@ -107,6 +107,7 @@ func (n *nullStream) run(quit chan struct{}) {
 			return
 		case <-ticker.C:
 			clear(n.out)
+			clear(n.in)
 			n.sink.process(n.out, n.in, n.frames)
 		}
 	}

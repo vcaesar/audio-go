@@ -24,6 +24,7 @@ type Device struct {
 	stream  stream
 	run     uint64 // run number of the last successful start
 	running bool   // stream.start succeeded and stream.stop is still due
+	closing bool   // Uninit has begun; Start is rejected
 }
 
 // InitDevice initializes a device.
@@ -137,7 +138,7 @@ func (dev *Device) PlaybackInternalChannels() uint32 {
 func (dev *Device) Start() error {
 	dev.mu.Lock()
 	defer dev.mu.Unlock()
-	if dev.stream == nil {
+	if dev.stream == nil || dev.closing {
 		return ErrDeviceNotInitialized
 	}
 	if dev.running {
@@ -192,6 +193,11 @@ func (dev *Device) Stop() error {
 // This will explicitly stop the device. You do not need to call Stop() beforehand, but it's
 // harmless if you do.
 func (dev *Device) Uninit() {
+	// Reject Start from here on, including from the Stop callback, so that
+	// the stream is stopped when it is closed.
+	dev.mu.Lock()
+	dev.closing = true
+	dev.mu.Unlock()
 	// A failed stop still leaves the stream released; close it regardless.
 	if err := dev.Stop(); err == ErrDeviceNotInitialized {
 		return
